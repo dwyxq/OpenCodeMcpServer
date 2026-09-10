@@ -26,6 +26,7 @@ public class ProviderHealthService : IProviderHealthService
     private readonly ProviderDiscoveryConfig _endpoints;
     private readonly ProviderApiKeyConfig _apiKeys;
     private readonly ConcurrentDictionary<string, MutableState> _states = new(StringComparer.OrdinalIgnoreCase);
+    private readonly ConcurrentDictionary<string, ProviderRateLimitEntry> _rateLimits = new(StringComparer.OrdinalIgnoreCase);
     private readonly SemaphoreSlim _probeLock = new(1, 1);
     private readonly RoutingConfig _routing;
     private DateTime _lastFullProbe = DateTime.MinValue;
@@ -174,6 +175,49 @@ public class ProviderHealthService : IProviderHealthService
             }
         }
         SaveState();
+    }
+
+    /// <inheritdoc/>
+    public void ReportRateLimited(string providerId, int retryAfterMs)
+    {
+        if (retryAfterMs <= 0) retryAfterMs = 60_000; // 默认 60 秒避让
+        var entry = new ProviderRateLimitEntry(
+            ProviderId: providerId,
+            RateLimitedAt: DateTime.UtcNow,
+            RetryAfterAt: DateTime.UtcNow.AddMilliseconds(retryAfterMs),
+            RetryAfterMs: retryAfterMs);
+        _rateLimits[providerId] = entry;
+        _logger.LogWarning("Provider {ProviderId} rate limited until {Until} ({Ms}ms)",
+            providerId, entry.RetryAfterAt, retryAfterMs);
+    }
+
+    /// <inheritdoc/>
+    public bool IsRateLimited(string providerId)
+    {
+        if (!_rateLimits.TryGetValue(providerId, out var entry)) return false;
+        if (entry.RetryAfterAt <= DateTime.UtcNow)
+        {
+            _rateLimits.TryRemove(providerId, out _);
+            return false;
+        }
+        return true;
+    }
+
+    /// <inheritdoc/>
+    public IReadOnlyList<ProviderRateLimitEntry> GetRateLimitReport()
+    {
+        var now = DateTime.UtcNow;
+        return _rateLimits.Values
+            .Where(e => e.RetryAfterAt > now)
+            .OrderBy(e => e.RetryAfterAt)
+            .ToList();
+    }
+
+    /// <inheritdoc/>
+    public void ClearRateLimits()
+    {
+        _rateLimits.Clear();
+        _logger.LogInformation("All rate limits cleared");
     }
 
     /// <summary>获取所有启用的 OpenAI 兼容自定义提供商配置</summary>

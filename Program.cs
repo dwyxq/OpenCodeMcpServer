@@ -66,9 +66,7 @@ builder.Services.AddSingleton(Options.Create(config.ProviderEndpoints));
 builder.Services.AddSingleton(Options.Create(config.ProviderApiKeys));
 
 // 注册内存缓存
-builder.Services.AddMemoryCache(options => {
-    options.SizeLimit = 1024 * 1024 * 100; // 100MB
-});
+builder.Services.AddMemoryCache();
 
 // 注册 HttpClient - 为每个 Provider 配置独立的 HttpClient
 builder.Services.AddHttpClient<IModelSourceProvider, HuggingFaceModelProvider>(client => {

@@ -45,7 +45,14 @@ public class ModelDiscoveryService : IModelDiscoveryService {
 
         var tasks = _providers
             .Where(p => enabledSources.Contains(p.Source))
-            .Select(p => p.FetchModelsAsync(query, cancellationToken));
+            .Select(async p => {
+                try {
+                    return await p.FetchModelsAsync(query, cancellationToken);
+                } catch (Exception ex) {
+                    _logger.LogWarning(ex, "Provider {Source} failed, skipping", p.Source);
+                    return Array.Empty<FreeModel>();
+                }
+            });
 
         var results = await Task.WhenAll(tasks);
         var allModels = results.SelectMany(r => r).ToList();
@@ -150,7 +157,13 @@ public class ModelDiscoveryService : IModelDiscoveryService {
 
         var tasks = _providers
             .Where(p => _config.ModelDiscovery.EnabledSources.Contains(p.Source.ToString(), StringComparer.OrdinalIgnoreCase))
-            .Select(p => p.FetchModelsAsync(query, cancellationToken));
+            .Select(async p => {
+                try {
+                    await p.FetchModelsAsync(query, cancellationToken);
+                } catch (Exception ex) {
+                    _logger.LogWarning(ex, "Provider {Source} failed during cache refresh, skipping", p.Source);
+                }
+            });
 
         await Task.WhenAll(tasks);
         _logger.LogInformation("Model cache refreshed successfully");
@@ -173,7 +186,14 @@ public class ModelDiscoveryService : IModelDiscoveryService {
 
         var tasks = _providers
             .Where(p => _config.ModelDiscovery.EnabledSources.Contains(p.Source.ToString(), StringComparer.OrdinalIgnoreCase))
-            .Select(p => p.FetchModelsAsync(query, cancellationToken));
+            .Select(async p => {
+                try {
+                    return await p.FetchModelsAsync(query, cancellationToken);
+                } catch (Exception ex) {
+                    _logger.LogWarning(ex, "Provider {Source} failed during discovery, skipping", p.Source);
+                    return Array.Empty<FreeModel>();
+                }
+            });
 
         var results = await Task.WhenAll(tasks);
         var allModels = results.SelectMany(r => r).ToList();
