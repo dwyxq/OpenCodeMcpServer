@@ -16,6 +16,9 @@ public interface IChatCompletionProxyService
 
     /// <summary>列出所有配置提供商及其静态模型目录（含健康状态）</summary>
     Task<ProviderCatalogEntry[]> GetProviderCatalogAsync(CancellationToken cancellationToken = default);
+
+    /// <summary>流式转发聊天补全请求：force stream=false 发上游，收到完整响应后包装成 SSE 流返回</summary>
+    IAsyncEnumerable<string> ChatStreamAsync(ChatProxyRequest request, CancellationToken cancellationToken = default);
 }
 
 /// <summary>
@@ -43,7 +46,13 @@ public record ChatProxyRequest(
 /// <summary>
 /// 聊天消息
 /// </summary>
-public record ChatMessage(string Role, string Content);
+public record ChatMessage(
+    string Role,
+    string Content,
+    /// <summary>工具调用 ID（tool 角色消息必填，配合 assistant 的 tool_calls）</summary>
+    string? ToolCallId = null,
+    /// <summary>assistant 消息的工具调用数组原始 JSON（如 [{"id":"call_x","type":"function","function":{...}}]）</summary>
+    string? ToolCallsJson = null);
 
 /// <summary>
 /// 代理聊天结果

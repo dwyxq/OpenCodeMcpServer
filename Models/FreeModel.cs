@@ -163,7 +163,8 @@ public record McpServerConfig(
     SkillManagementConfig SkillManagement,
     CacheConfig Cache,
     LoggingConfig Logging,
-    RoutingConfig Routing
+    RoutingConfig Routing,
+    HttpServerConfig HttpServer
 );
 
 /// <summary>
@@ -185,7 +186,9 @@ public record RoutingConfig(
     /// <summary>热池为空时是否降级探索通道（挑选未达阈值/探测数据不足的候选以积累健康数据）</summary>
     bool ExplorationEnabled = true,
     /// <summary>提供商被限流（HTTP 429）后自动避让的退避毫秒（响应未带 Retry-After 时的默认值；带则用头值）</summary>
-    int RateLimitRetryAfterMs = 30000
+    int RateLimitRetryAfterMs = 30000,
+    /// <summary>固定模型别名：chat_completion 的 model 填此值（或 auto）时，按健康评分自动选提供商并发送该提供商的默认模型（DefaultModel，缺省回退 Models 首个）</summary>
+    string ModelAlias = "SuperModel"
 );
 
 /// <summary>
@@ -232,6 +235,20 @@ public record CacheConfig(
     int DefaultTtlMinutes,
     int MaxCacheSizeMb,
     bool EnableCompression
+);
+
+/// <summary>
+/// OpenAI 兼容 HTTP 服务配置（Kestrel 监听，向 OpenCode 等客户端暴露固定模型别名 SuperModel）
+/// </summary>
+public record HttpServerConfig(
+    /// <summary>是否启用 HTTP 服务</summary>
+    bool Enabled = false,
+    /// <summary>监听地址（默认回环，仅本机可访问）</summary>
+    string Url = "http://127.0.0.1:5679",
+    /// <summary>可选 Bearer 令牌；空则不鉴权（仅本机回环建议留空）</summary>
+    string? ApiKey = null,
+    /// <summary>模型列表只暴露固定别名，还是同时暴露全部真实模型（false 只暴露别名，简洁）</summary>
+    bool IncludeRealModels = false
 );
 
 /// <summary>

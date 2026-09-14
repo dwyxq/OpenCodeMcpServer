@@ -24,7 +24,8 @@ public static class McpServerConfigBinder
             SkillManagement: configuration.GetSection("SkillManagement").Get<SkillManagementConfig>() ?? DefaultSkillManagementConfig(),
             Cache: configuration.GetSection("Cache").Get<CacheConfig>() ?? DefaultCacheConfig(),
             Logging: configuration.GetSection("Logging").Get<LoggingConfig>() ?? DefaultLoggingConfig(),
-            Routing: BindRouting(configuration)
+            Routing: BindRouting(configuration),
+            HttpServer: configuration.GetSection("HttpServer").Get<HttpServerConfig>() ?? new HttpServerConfig()
         );
 
         return config;
@@ -45,7 +46,8 @@ public static class McpServerConfigBinder
             RetryBackoffMs: section["RetryBackoffMs"] == null ? def.RetryBackoffMs : int.Parse(section["RetryBackoffMs"]!),
             HotPoolThreshold: section["HotPoolThreshold"] == null ? def.HotPoolThreshold : int.Parse(section["HotPoolThreshold"]!),
             ExplorationEnabled: section["ExplorationEnabled"] == null ? def.ExplorationEnabled : bool.Parse(section["ExplorationEnabled"]!),
-            RateLimitRetryAfterMs: section["RateLimitRetryAfterMs"] == null ? def.RateLimitRetryAfterMs : int.Parse(section["RateLimitRetryAfterMs"]!)
+            RateLimitRetryAfterMs: section["RateLimitRetryAfterMs"] == null ? def.RateLimitRetryAfterMs : int.Parse(section["RateLimitRetryAfterMs"]!),
+            ModelAlias: string.IsNullOrWhiteSpace(section["ModelAlias"]) ? def.ModelAlias : section["ModelAlias"]!
         );
     }
 
@@ -57,7 +59,8 @@ public static class McpServerConfigBinder
         RetryBackoffMs: 500,
         HotPoolThreshold: 80,
         ExplorationEnabled: true,
-        RateLimitRetryAfterMs: 30000
+        RateLimitRetryAfterMs: 30000,
+        ModelAlias: "SuperModel"
     );
 
     private static ProviderDiscoveryConfig BindProviderEndpoints(IConfiguration configuration)

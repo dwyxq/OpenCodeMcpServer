@@ -1,0 +1,9 @@
+# 1. 先停止旧进程（如果有）
+Stop-Process -Name OpenCodeMcpServer -Force -ErrorAction SilentlyContinue
+
+# 2. 重新编译
+cd D:\LiHWork\OpenCodeMcpServer
+dotnet build
+
+# 3. 启动（保持终端窗口打开，stdin 不能关）
+& "bin\Debug\net10.0\win-x64\OpenCodeMcpServer.exe"

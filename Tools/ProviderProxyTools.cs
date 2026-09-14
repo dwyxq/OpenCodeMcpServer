@@ -69,7 +69,7 @@ public sealed class ProviderProxyTools {
 
     [McpServerTool, Description("代理转发 OpenAI 兼容 chat/completions 请求到免费提供商；未指定提供商时按健康评分自动择优，失败自动切换下一优提供商")]
     public async Task<string> ChatCompletion(
-        [Description("模型 ID，如 kimi-k3、big-pickle、LongCat-2.0（也可写 provider/model 形式）")] string model,
+        [Description("模型 ID，如 kimi-k3、big-pickle、LongCat-2.0（也可写 provider/model 形式）；填 SuperModel 或 auto 则由健康评分自动选提供商及其默认模型")] string model,
         [Description("用户消息内容（与 systemPrompt 二选一；复杂对话用 messagesJson）")] string? message = null,
         [Description("系统提示词（可选）")] string? systemPrompt = null,
         [Description("完整消息列表 JSON，格式 [{\"role\":\"user\",\"content\":\"...\"}]（提供时忽略 message/systemPrompt）")] string? messagesJson = null,
@@ -100,7 +100,7 @@ var request = new ChatProxyRequest(
             return $"❌ 转发失败（尝试 {result.Attempts} 次，已试: {(result.TriedProviders.Length > 0 ? string.Join(" → ", result.TriedProviders) : "无")}）：{result.Error}";
 
         var output = new StringBuilder();
-        output.AppendLine($"✅ 经 {result.ProviderId} 调用 {model} 成功（延迟 {result.LatencyMs}ms，尝试 {result.Attempts} 次）");
+        output.AppendLine($"✅ 经 {result.ProviderId} 调用 {result.Model} 成功（延迟 {result.LatencyMs}ms，尝试 {result.Attempts} 次）");
         output.AppendLine();
         output.AppendLine("上游响应:");
         output.AppendLine(ExtractAssistantContent(result.ResponseJson));
@@ -141,19 +141,34 @@ foreach (var p in ranked) {
     private static ChatMessage[]? ParseMessages(string? message, string? systemPrompt, string? messagesJson) {
         if (!string.IsNullOrWhiteSpace(messagesJson)) {
             try {
-                var parsed = JsonSerializer.Deserialize<ChatMessage[]>(messagesJson,
-                    new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
-                return parsed is { Length: > 0 } ? parsed : null;
+                using var doc = JsonDocument.Parse(messagesJson);
+                if (doc.RootElement.ValueKind != JsonValueKind.Array) return null;
+                var parsed = new List<ChatMessage>();
+                foreach (var m in doc.RootElement.EnumerateArray()) {
+                    var role = m.TryGetProperty("role", out var r) && r.ValueKind == JsonValueKind.String ? r.GetString() : null;
+                    string? content = null;
+                    if (m.TryGetProperty("content", out var c))
+                        content = c.ValueKind == JsonValueKind.String ? c.GetString() : c.ToString();
+                    string? toolCallId = null;
+                    if (m.TryGetProperty("tool_call_id", out var tci) && tci.ValueKind == JsonValueKind.String)
+                        toolCallId = tci.GetString();
+                    string? toolCallsJson = null;
+                    if (m.TryGetProperty("tool_calls", out var tc) && tc.ValueKind == JsonValueKind.Array)
+                        toolCallsJson = tc.GetRawText();
+                    if (!string.IsNullOrWhiteSpace(role))
+                        parsed.Add(new ChatMessage(role!, content ?? "", toolCallId, toolCallsJson));
+                }
+                return parsed.Count > 0 ? parsed.ToArray() : null;
             } catch (JsonException) {
                 return null;
             }
         }
         if (string.IsNullOrWhiteSpace(message)) return null;
 
-        var list = new List<ChatMessage>();
-        if (!string.IsNullOrWhiteSpace(systemPrompt)) list.Add(new ChatMessage("system", systemPrompt));
-        list.Add(new ChatMessage("user", message));
-        return list.ToArray();
+        var fallback = new List<ChatMessage>();
+        if (!string.IsNullOrWhiteSpace(systemPrompt)) fallback.Add(new ChatMessage("system", systemPrompt));
+        fallback.Add(new ChatMessage("user", message));
+        return fallback.ToArray();
     }
 
     /// <summary>从 OpenAI 标准响应提取助手回复文本（解析失败时返回原文）</summary>

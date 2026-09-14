@@ -61,7 +61,10 @@ public record ProviderEndpointConfig(
     bool Keyless = false,
 
     /// <summary>模型能力标签映射（模型名 → 能力标签列表，如 vision/function_calling；未配置则该模型视为全能力，不参与过滤）</summary>
-    Dictionary<string, string[]>? Capabilities = null
+    Dictionary<string, string[]>? Capabilities = null,
+
+    /// <summary>别名路由（model=SuperModel/auto）时该提供商实际发送的模型；缺省回退 Models 列表首个</summary>
+    string? DefaultModel = null
 );
 
 /// <summary>

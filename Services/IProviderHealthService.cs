@@ -48,6 +48,9 @@ public interface IProviderHealthService
 
     /// <summary>清除全部限流状态（供探测成功后重置）</summary>
     void ClearRateLimits();
+
+    /// <summary>判断提供商是否应被路由跳过：处于限流避让期或连续失败冷却期（健康但受限也须跳过）</summary>
+    bool IsUnavailableForRouting(string providerId);
 }
 
 /// <summary>

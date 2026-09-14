@@ -52,12 +52,14 @@ public class ChatCompletionProxyService : IChatCompletionProxyService {
         if (request.Messages.Length == 0)
             return Failure(request.Model, 0, Array.Empty<string>(), "messages 不能为空");
 
-        var candidates = ResolveCandidates(request);
+        var alias = IsModelAlias(request.Model);
+        var candidates = ResolveCandidates(request, alias);
         if (candidates.Count == 0)
             return Failure(request.Model, 0, Array.Empty<string>(),
-                $"未找到提供模型 '{request.Model}' 的已配置提供商（可用 provider_models 工具查看目录）");
+                alias ? $"别名 '{request.Model}' 无可用提供商（所有已启用提供商均无可用模型）"
+                      : $"未找到提供模型 '{request.Model}' 的已配置提供商（可用 provider_models 工具查看目录）");
 
-        var tried = new List<string>();
+        var tried = new List<(string ProviderId, string Reason)>();
         var attempts = 0;
         string? lastError = null;
         var maxAttempts = Math.Min(candidates.Count, Math.Max(1, _routing.MaxRetry + 1));
@@ -67,43 +69,54 @@ public class ChatCompletionProxyService : IChatCompletionProxyService {
             cancellationToken.ThrowIfCancellationRequested();
 
             // 总预算控制：超过 totalBudgetMs 直接终止（含重试的整次请求总耗时上限）
-            if (_routing.TotalBudgetMs > 0 && totalStopwatch.ElapsedMilliseconds >= _routing.TotalBudgetMs)
-                return Failure(request.Model, attempts, tried.ToArray(),
+            if (_routing.TotalBudgetMs > 0 && totalStopwatch.ElapsedMilliseconds >= _routing.TotalBudgetMs) {
+                var budgetReason = $"总预算{_routing.TotalBudgetMs}ms已耗尽";
+                tried.Add((endpoint.ProviderId, budgetReason));
+                return Failure(request.Model, attempts, FormatTried(tried),
                     $"{lastError ?? "尚未开始"}（整次请求总预算 {_routing.TotalBudgetMs}ms 已耗尽）");
+            }
 
             // 失败切换下家前退避（非首次尝试）
             if (attempts > 0 && _routing.RetryBackoffMs > 0)
                 await Task.Delay(_routing.RetryBackoffMs, cancellationToken);
 
-            tried.Add(endpoint.ProviderId);
             attempts++;
+            var actualModel = alias ? ResolveAliasModel(endpoint)! : StripProviderPrefix(request.Model, endpoint);
             var start = Stopwatch.GetTimestamp();
             try {
-                var json = await SendOnceAsync(endpoint, request, cancellationToken);
+                var json = await SendOnceAsync(endpoint, request, actualModel, cancellationToken);
                 var latency = (long)Stopwatch.GetElapsedTime(start).TotalMilliseconds;
                 _health.ReportSuccess(endpoint.ProviderId, latency);
                 _logger.LogInformation("Chat proxy ok: provider={Provider} model={Model} latency={Latency}ms attempts={Attempts}",
-                    endpoint.ProviderId, request.Model, latency, attempts);
+                    endpoint.ProviderId, actualModel, latency, attempts);
 
                 // sticky 粘滞：成功后记录 sessionId → 绑定 ProviderId
                 if (string.Equals(ResolveStrategy(request), "sticky", StringComparison.OrdinalIgnoreCase)
                     && !string.IsNullOrWhiteSpace(request.SessionId)) {
                     _sessionMap[request.SessionId] = endpoint.ProviderId;
                 }
-                return new ChatProxyResult(true, endpoint.ProviderId, request.Model, json, latency, attempts, tried.ToArray(), null);
+                return new ChatProxyResult(true, endpoint.ProviderId, actualModel, json, latency, attempts, FormatTried(tried), null);
             } catch (ProxyUpstreamException ex) {
-                lastError = $"{endpoint.ProviderId}: {ex.Message}";
-                _health.ReportFailure(endpoint.ProviderId, ex.Message);
+                var resolvedKey = _health.ResolveApiKey(endpoint);
+                var envVarName = endpoint.ApiKeyEnvVar;
+                var reason = ExtractShortReason(ex.Message, resolvedKey, envVarName);
+                tried.Add((endpoint.ProviderId, reason));
+                lastError = $"{endpoint.ProviderId}({reason}): {ex.Message}";
+                _ = Task.Run(() => _health.ReportFailure(endpoint.ProviderId, ex.Message));
                 _logger.LogWarning("Chat proxy upstream failure ({Provider}): {Error}", endpoint.ProviderId, ex.Message);
             } catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException or OperationCanceledException) {
                 if (cancellationToken.IsCancellationRequested) throw;
-                lastError = $"{endpoint.ProviderId}: {ex.Message}";
-                _health.ReportFailure(endpoint.ProviderId, ex.Message);
+                var resolvedKey = _health.ResolveApiKey(endpoint);
+                var envVarName = endpoint.ApiKeyEnvVar;
+                var reason = ExtractShortReason(ex.Message, resolvedKey, envVarName);
+                tried.Add((endpoint.ProviderId, reason));
+                lastError = $"{endpoint.ProviderId}({reason}): {ex.Message}";
+                _ = Task.Run(() => _health.ReportFailure(endpoint.ProviderId, ex.Message));
                 _logger.LogWarning("Chat proxy network failure ({Provider}): {Error}", endpoint.ProviderId, ex.Message);
             }
         }
 
-        return Failure(request.Model, attempts, tried.ToArray(), lastError ?? "所有候选提供商均失败");
+        return Failure(request.Model, attempts, FormatTried(tried), lastError ?? "所有候选提供商均失败");
     }
 
     /// <summary>
@@ -141,25 +154,29 @@ public class ChatCompletionProxyService : IChatCompletionProxyService {
     /// </summary>
     /// <param name="request"></param>
     /// <returns></returns>
-    private List<ProviderEndpointConfig> ResolveCandidates(ChatProxyRequest request) {
+    private List<ProviderEndpointConfig> ResolveCandidates(ChatProxyRequest request, bool alias) {
         var all = _healthImpl.GetConfiguredProviders()
             .GroupBy(p => p.ProviderId, StringComparer.OrdinalIgnoreCase)
             .Select(g => g.First())
-            .Where(p => p.Enabled)
+            .Where(p => p.Enabled && !_health.IsUnavailableForRouting(p.ProviderId))
             .ToDictionary(p => p.ProviderId, StringComparer.OrdinalIgnoreCase);
 
         if (!string.IsNullOrWhiteSpace(request.ProviderId)) {
             if (!all.TryGetValue(request.ProviderId, out var exact))
                 return new List<ProviderEndpointConfig>();
+            if (alias && ResolveAliasModel(exact) == null)
+                return new List<ProviderEndpointConfig>();
             return new List<ProviderEndpointConfig> { exact };
         }
 
-        // 候选：按健康评分排序的、能提供该模型且满足能力过滤的提供商
+        // 候选：按健康评分排序；别名模式取所有有可用模型的提供商，普通模式按模型归属 + 能力过滤
+        // 限流中的提供商（HTTP 429 避让期内）一律排除，健康但受限同样自动切换下一候选
         var ranked = _health.GetRankedProviders();
-        var baseCandidates = ranked
-            .Where(h => all.TryGetValue(h.ProviderId, out var ep)
+        var baseCandidates = (alias
+            ? ranked.Where(h => all.TryGetValue(h.ProviderId, out var ep) && ResolveAliasModel(ep!) != null)
+            : ranked.Where(h => all.TryGetValue(h.ProviderId, out var ep)
                 && ServesModel(ep!, request.Model)
-                && SupportsCapabilities(ep!, request.Model, request.Capabilities))
+                && SupportsCapabilities(ep!, request.Model, request.Capabilities)))
             .Select(h => all[h.ProviderId])
             .ToList();
 
@@ -235,6 +252,16 @@ public class ChatCompletionProxyService : IChatCompletionProxyService {
         return candidates.Skip(idx).Concat(candidates.Take(idx)).ToList();
     }
 
+    /// <summary>判断 model 是否为固定别名（Routing:ModelAlias 配置值，或通用别名 auto）</summary>
+    private bool IsModelAlias(string model) =>
+        (!string.IsNullOrWhiteSpace(_routing.ModelAlias)
+            && string.Equals(model, _routing.ModelAlias, StringComparison.OrdinalIgnoreCase))
+        || string.Equals(model, "auto", StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>别名路由时该提供商实际发送的模型：DefaultModel 优先，缺省回退静态 Models 目录首个</summary>
+    private static string? ResolveAliasModel(ProviderEndpointConfig endpoint) =>
+        endpoint.DefaultModel ?? endpoint.Models?.FirstOrDefault();
+
     /// <summary>判断提供商是否支持该模型：静态目录 + 前缀写法 provider/model 兼容</summary>
     private static bool ServesModel(ProviderEndpointConfig endpoint, string model) {
         if (model.StartsWith(endpoint.ProviderId + "/", StringComparison.OrdinalIgnoreCase))
@@ -255,33 +282,30 @@ public class ChatCompletionProxyService : IChatCompletionProxyService {
         return required.All(r => cap.Value.Contains(r, StringComparer.OrdinalIgnoreCase));
     }
 
-    /// <summary>向单个提供商发送一次非流式 chat/completions 请求</summary>
-    private async Task<string> SendOnceAsync(ProviderEndpointConfig endpoint, ChatProxyRequest request, CancellationToken cancellationToken) {
+    /// <summary>向单个提供商发送一次非流式 chat/completions 请求（actualModel 为最终上游模型名：普通请求去前缀，别名请求为该提供商默认模型）</summary>
+    private async Task<string> SendOnceAsync(ProviderEndpointConfig endpoint, ChatProxyRequest request, string actualModel, CancellationToken cancellationToken) {
         var client = _httpClientFactory.CreateClient("openai-compat");
         var timeout = _routing.FirstTokenTimeoutMs > 0
             ? Math.Clamp(_routing.FirstTokenTimeoutMs / 1000.0, 1, 600)
             : Math.Clamp(endpoint.TimeoutSeconds, 10, 600);
 
-        var payload = new Dictionary<string, object> {
-            ["model"] = StripProviderPrefix(request.Model, endpoint),
-            ["messages"] = request.Messages.Select(m => new Dictionary<string, object> { ["role"] = m.Role, ["content"] = m.Content }).ToArray(),
-            ["stream"] = false
-        };
-        if (request.Temperature.HasValue) payload["temperature"] = request.Temperature.Value;
-        if (request.MaxTokens.HasValue) payload["max_tokens"] = request.MaxTokens.Value;
-
-        using var httpRequest = new HttpRequestMessage(HttpMethod.Post, $"{endpoint.BaseUrl.TrimEnd('/')}/chat/completions") {
-            Content = new StringContent(JsonSerializer.Serialize(payload), Encoding.UTF8, "application/json")
-        };
-        _healthImpl.ApplyAuthHeaders(httpRequest, endpoint);
+        var httpRequest = BuildHttpRequest(endpoint, request, actualModel, stream: false);
 
         using var cts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         cts.CancelAfter(TimeSpan.FromSeconds(timeout));
         using var response = await client.SendAsync(httpRequest, HttpCompletionOption.ResponseContentRead, cts.Token);
         var body = await response.Content.ReadAsStringAsync(cts.Token);
 
-        if (!response.IsSuccessStatusCode)
+        if (!response.IsSuccessStatusCode) {
+            // HTTP 429 限流：记录避让（ReportRateLimited）并抛 ProxyUpstreamException 触发故障转移，
+            // 使"健康但受限"的提供商自动切换下一候选而非反复重试
+            if (response.StatusCode == System.Net.HttpStatusCode.TooManyRequests) {
+                var retryAfterMs = ParseRetryAfterMs(response);
+                _health.ReportRateLimited(endpoint.ProviderId, retryAfterMs);
+                throw new ProxyUpstreamException($"HTTP 429 rate limited, retry after {retryAfterMs}ms");
+            }
             throw new ProxyUpstreamException($"HTTP {(int)response.StatusCode}: {Truncate(body, 300)}");
+        }
         return body;
     }
 
@@ -292,8 +316,205 @@ public class ChatCompletionProxyService : IChatCompletionProxyService {
 
     private static string Truncate(string text, int max) => text.Length <= max ? text : text[..max] + "...";
 
+    /// <summary>解析 HTTP 429 响应的 Retry-After 头为避让毫秒；缺省回退 Routing:RateLimitRetryAfterMs</summary>
+    private int ParseRetryAfterMs(HttpResponseMessage response)
+    {
+        if (response.Headers.RetryAfter != null)
+        {
+            if (response.Headers.RetryAfter.Delta.HasValue)
+                return (int)Math.Clamp(response.Headers.RetryAfter.Delta.Value.TotalMilliseconds, 1, 600_000);
+            if (response.Headers.RetryAfter.Date.HasValue)
+            {
+                var diff = (long)(response.Headers.RetryAfter.Date.Value.UtcDateTime - DateTime.UtcNow).TotalMilliseconds;
+                return (int)Math.Clamp(diff, 1, 600_000);
+            }
+        }
+        return _routing.RateLimitRetryAfterMs;
+    }
+
+    /// <inheritdoc/>
+    public async IAsyncEnumerable<string> ChatStreamAsync(ChatProxyRequest request, [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken cancellationToken = default) {
+        if (string.IsNullOrWhiteSpace(request.Model)) {
+            yield return SerializeSseError("model 参数不能为空");
+            yield break;
+        }
+        if (request.Messages.Length == 0) {
+            yield return SerializeSseError("messages 不能为空");
+            yield break;
+        }
+
+        var alias = IsModelAlias(request.Model);
+        var candidates = ResolveCandidates(request, alias);
+        if (candidates.Count == 0) {
+            var msg = alias ? $"别名 '{request.Model}' 无可用提供商" : $"未找到提供模型 '{request.Model}' 的已配置提供商";
+            yield return SerializeSseError(msg);
+            yield break;
+        }
+
+        var tried = new List<(string ProviderId, string Reason)>();
+        var attempts = 0;
+        string? lastError = null;
+        var maxAttempts = Math.Min(candidates.Count, Math.Max(1, _routing.MaxRetry + 1));
+        var totalStopwatch = Stopwatch.StartNew();
+
+        foreach (var endpoint in candidates.Take(maxAttempts)) {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (_routing.TotalBudgetMs > 0 && totalStopwatch.ElapsedMilliseconds >= _routing.TotalBudgetMs) {
+                var budgetReason = $"总预算{_routing.TotalBudgetMs}ms已耗尽";
+                tried.Add((endpoint.ProviderId, budgetReason));
+                yield return SerializeSseError($"{lastError ?? "整次请求总预算已耗尽"}（已尝试: {string.Join(" -> ", FormatTried(tried))}）");
+                yield break;
+            }
+            if (attempts > 0 && _routing.RetryBackoffMs > 0)
+                await Task.Delay(_routing.RetryBackoffMs, cancellationToken);
+
+            attempts++;
+            var actualModel = alias ? ResolveAliasModel(endpoint)! : StripProviderPrefix(request.Model, endpoint);
+            var start = Stopwatch.GetTimestamp();
+            HttpResponseMessage? upstreamResponse = null;
+            try {
+                upstreamResponse = await SendOnceStreamAsync(endpoint, request, actualModel, cancellationToken);
+                var latency = (long)Stopwatch.GetElapsedTime(start).TotalMilliseconds;
+                _health.ReportSuccess(endpoint.ProviderId, latency);
+                _logger.LogInformation("Chat stream ok: provider={Provider} model={Model} latency={Latency}ms attempts={Attempts}",
+                    endpoint.ProviderId, actualModel, latency, attempts);
+
+                if (string.Equals(ResolveStrategy(request), "sticky", StringComparison.OrdinalIgnoreCase)
+                    && !string.IsNullOrWhiteSpace(request.SessionId))
+                    _sessionMap[request.SessionId] = endpoint.ProviderId;
+            } catch (ProxyUpstreamException ex) {
+                var resolvedKey = _health.ResolveApiKey(endpoint);
+                var envVarName = endpoint.ApiKeyEnvVar;
+                var reason = ExtractShortReason(ex.Message, resolvedKey, envVarName);
+                tried.Add((endpoint.ProviderId, reason));
+                lastError = $"{endpoint.ProviderId}({reason}): {ex.Message}";
+                _ = Task.Run(() => _health.ReportFailure(endpoint.ProviderId, ex.Message));
+                _logger.LogWarning("Chat stream upstream failure ({Provider}): {Error}", endpoint.ProviderId, ex.Message);
+                upstreamResponse?.Dispose();
+                continue;
+            } catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException or OperationCanceledException) {
+                if (cancellationToken.IsCancellationRequested) throw;
+                var resolvedKey = _health.ResolveApiKey(endpoint);
+                var envVarName = endpoint.ApiKeyEnvVar;
+                var reason = ExtractShortReason(ex.Message, resolvedKey, envVarName);
+                tried.Add((endpoint.ProviderId, reason));
+                lastError = $"{endpoint.ProviderId}({reason}): {ex.Message}";
+                _ = Task.Run(() => _health.ReportFailure(endpoint.ProviderId, ex.Message));
+                _logger.LogWarning("Chat stream network failure ({Provider}): {Error}", endpoint.ProviderId, ex.Message);
+                upstreamResponse?.Dispose();
+                continue;
+            }
+
+            // 成功：读取上游 SSE 流并转发（无 try-catch，OperationCanceledException 自然终止迭代）
+            using (upstreamResponse) {
+                using var reader = new System.IO.StreamReader(upstreamResponse.Content.ReadAsStream(cancellationToken));
+                while (!cancellationToken.IsCancellationRequested) {
+                    var line = await reader.ReadLineAsync(cancellationToken);
+                    if (line == null) break;
+                    if (line.StartsWith("data: ")) {
+                        yield return $"data: {line[6..]}\n\n";
+                        if (line[6..] == "[DONE]") yield break;
+                    } else if (!string.IsNullOrWhiteSpace(line)) {
+                        yield return $"{line}\n\n";
+                    }
+                }
+            }
+            yield break;
+        }
+        yield return SerializeSseError($"{lastError ?? "所有候选提供商均失败"}（已尝试: {string.Join(" -> ", FormatTried(tried))}）");
+    }
+
+    private static string SerializeSseError(string message) =>
+        $"data: {JsonSerializer.Serialize(new { error = new { message, type = "upstream_error" } })}\n\n";
+
+    private async Task<HttpResponseMessage> SendOnceStreamAsync(ProviderEndpointConfig endpoint, ChatProxyRequest request, string actualModel, CancellationToken cancellationToken) {
+        var client = _httpClientFactory.CreateClient("openai-compat");
+        var timeout = _routing.FirstTokenTimeoutMs > 0
+            ? Math.Clamp(_routing.FirstTokenTimeoutMs / 1000.0, 1, 600)
+            : Math.Clamp(endpoint.TimeoutSeconds, 10, 600);
+
+        var httpRequest = BuildHttpRequest(endpoint, request, actualModel, stream: true);
+        using var cts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        cts.CancelAfter(TimeSpan.FromSeconds(timeout));
+        var response = await client.SendAsync(httpRequest, HttpCompletionOption.ResponseHeadersRead, cts.Token);
+
+        if (!response.IsSuccessStatusCode) {
+            var body = await response.Content.ReadAsStringAsync(cts.Token);
+            if (response.StatusCode == System.Net.HttpStatusCode.TooManyRequests) {
+                var retryAfterMs = ParseRetryAfterMs(response);
+                _health.ReportRateLimited(endpoint.ProviderId, retryAfterMs);
+                throw new ProxyUpstreamException($"HTTP 429 rate limited, retry after {retryAfterMs}ms");
+            }
+            _health.ReportFailure(endpoint.ProviderId, $"HTTP {(int)response.StatusCode}");
+            throw new ProxyUpstreamException($"HTTP {(int)response.StatusCode}: {Truncate(body, 300)}");
+        }
+        return response;
+    }
+
+    private HttpRequestMessage BuildHttpRequest(ProviderEndpointConfig endpoint, ChatProxyRequest request, string actualModel, bool stream) {
+        var payload = new Dictionary<string, object> {
+            ["model"] = actualModel,
+            ["messages"] = request.Messages.Select(m => {
+                var msg = new Dictionary<string, object> { ["role"] = m.Role, ["content"] = m.Content ?? "" };
+                // 透传 tool_call_id（tool 角色消息必填）
+                if (!string.IsNullOrWhiteSpace(m.ToolCallId))
+                    msg["tool_call_id"] = m.ToolCallId;
+                // 透传 assistant 的 tool_calls 数组（函数调用场景）
+                if (!string.IsNullOrWhiteSpace(m.ToolCallsJson))
+                    msg["tool_calls"] = System.Text.Json.JsonSerializer.Deserialize<object[]>(m.ToolCallsJson)!;
+                return msg;
+            }).ToArray(),
+            ["stream"] = stream
+        };
+        if (request.Temperature.HasValue) payload["temperature"] = request.Temperature.Value;
+        if (request.MaxTokens.HasValue) payload["max_tokens"] = request.MaxTokens.Value;
+
+        var json = JsonSerializer.Serialize(payload);
+        var httpRequest = new HttpRequestMessage(HttpMethod.Post, $"{endpoint.BaseUrl.TrimEnd('/')}/chat/completions") {
+            Content = new StringContent(json, Encoding.UTF8, "application/json")
+        };
+        _healthImpl.ApplyAuthHeaders(httpRequest, endpoint);
+        return httpRequest;
+    }
+
     private static ChatProxyResult Failure(string model, int attempts, string[] tried, string error) =>
         new(false, null, model, null, 0, attempts, tried, error);
+
+    /// <summary>格式化尝试列表为 "providerId(原因)" 格式</summary>
+    private static string[] FormatTried(List<(string ProviderId, string Reason)> tried) =>
+        tried.Select(t => string.IsNullOrWhiteSpace(t.Reason) ? t.ProviderId : $"{t.ProviderId}({t.Reason})").ToArray();
+
+    /// <summary>脱敏 API Key：显示前4位+****+后4位；空串显示"为空"</summary>
+    private static string MaskKey(string? key) {
+        if (string.IsNullOrWhiteSpace(key)) return "为空";
+        if (key.Length <= 8) return "****";
+        return $"{key[..4]}****{key[^4..]}";
+    }
+
+    /// <summary>从 ProxyUpstreamException 消息中提取短原因，并附带 Key 信息</summary>
+    private static string ExtractShortReason(string message, string? resolvedKey, string? envVarName) {
+        string reason;
+        if (message.Contains("403")) reason = "余额不足";
+        else if (message.Contains("401")) reason = "密钥无效";
+        else if (message.Contains("429")) reason = "限流";
+        else if (message.Contains("402")) reason = "付费问题";
+        else if (message.Contains("400")) reason = "请求无效";
+        else if (message.Contains("500") || message.Contains("502") || message.Contains("503")) reason = "服务异常";
+        else if (message.Contains("timed out", StringComparison.OrdinalIgnoreCase) || message.Contains("超时")) reason = "超时";
+        else if (message.Contains("connection", StringComparison.OrdinalIgnoreCase)) reason = "连接失败";
+        else {
+            var colonIdx = message.IndexOf(':');
+            reason = colonIdx > 0 && colonIdx < message.Length - 1
+                ? message[(colonIdx + 1)..].Trim()
+                : message;
+            reason = reason.Length > 20 ? reason[..20] + "..." : reason;
+        }
+
+        // 附带 Key 信息
+        if (!string.IsNullOrWhiteSpace(envVarName))
+            return $"{reason}：\"{envVarName}\" \"{MaskKey(resolvedKey)}\"";
+        return $"{reason}：key 未配置";
+    }
 
     /// <summary>上游返回非 2xx（计入失败评分并触发故障转移）</summary>
     private sealed class ProxyUpstreamException : Exception {
