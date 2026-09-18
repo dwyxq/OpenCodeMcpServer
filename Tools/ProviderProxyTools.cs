@@ -46,6 +46,7 @@ public sealed class ProviderProxyTools {
             output.AppendLine($"**端点**: {p.BaseUrl}");
             output.AppendLine($"**密钥**: {(p.Keyless ? "免密钥" : p.HasApiKey ? "已配置" : "未配置（请设置环境变量）")}" + (p.Enabled ? "" : " **已禁用**"));
             output.AppendLine($"**健康评分**: {p.Score:0.#}" + (p.LastError != null ? $" | 最近错误: {p.LastError}" : ""));
+            output.AppendLine($"**分组**: {(p.Groups?.Length > 0 ? string.Join(", ", p.Groups) : "未分组")}");
             output.AppendLine($"**模型** ({p.Models.Length}): {string.Join(", ", p.Models)}");
             output.AppendLine();
         }
@@ -79,12 +80,13 @@ public sealed class ProviderProxyTools {
         [Description("路由策略（auto=健康择优 / sticky=会话粘滞 / balanced=轮询均衡，空用 Routing 默认）")] string? strategy = null,
         [Description("会话 ID（sticky 粘滞策略下绑定到固定提供商）")] string? sessionId = null,
         [Description("必需能力标签列表（如 vision,function_calling，仅选满足该能力的模型提供商）")] string[]? capabilities = null,
+        [Description("分组 ID（如 高能力组/推理组/代码组/图形处理组/均衡组/文案组，仅选属于该组的提供商）")] string? groupId = null,
         CancellationToken cancellationToken = default) {
         var messages = ParseMessages(message, systemPrompt, messagesJson);
         if (messages == null)
             return "参数错误：请提供 message 或 messagesJson";
 
-var request = new ChatProxyRequest(
+        var request = new ChatProxyRequest(
             Model: model,
             Messages: messages,
             ProviderId: providerId,
@@ -92,7 +94,8 @@ var request = new ChatProxyRequest(
             MaxTokens: maxTokens,
             Strategy: strategy,
             SessionId: sessionId,
-            Capabilities: capabilities);
+            Capabilities: capabilities,
+            GroupId: groupId);
 
         var result = await _proxy.ChatAsync(request, cancellationToken);
 
@@ -124,6 +127,40 @@ foreach (var p in ranked) {
         return output.ToString();
     }
 
+    // <summary>
+    /// 【功能说明】：列出所有模型分组及其说明，供 OpenCode 用户了解分组语义
+    /// 【服务对象】：OpenCode 客户端经 MCP 协议调用
+    /// 【调用方式】：list_group_configs MCP 工具
+    /// 【禁止重复】：项目内唯一分组元数据列表实现
+    /// </summary>
+    [McpServerTool, Description("列出所有模型分组（高能力组/均衡组/推理组/代码组/文案组/图形处理组）及其说明和别名格式，用于指导 OpenCode 的 model 字段配置")]
+    public async Task<string> ListGroupConfigs(CancellationToken cancellationToken = default) {
+        var groupSvc = _health as GroupConfigService;
+        if (groupSvc == null) return "分组配置服务不可用";
+        var groups = groupSvc.Groups;
+        var alias = groupSvc.ModelAlias;
+        var output = new StringBuilder();
+        output.AppendLine($"共 {groups.Count} 个分组:");
+        output.AppendLine();
+        foreach (var g in groups) {
+            output.AppendLine($"### {g.Label}（别名格式: {alias}-{g.GroupId}）");
+            output.AppendLine($"**分组 ID**: `{g.GroupId}`");
+            output.AppendLine($"**说明**: {g.Description ?? "(无说明)"}");
+            if (!string.IsNullOrWhiteSpace(g.DefaultModel))
+                output.AppendLine($"**默认模型**: `{g.DefaultModel}`");
+            output.AppendLine();
+        }
+        output.AppendLine("### OpenCode 配置示例");
+        output.AppendLine("```json");
+        output.AppendLine("\"provider\": {");
+        foreach (var g in groups) {
+            output.AppendLine($"  \"{alias}-{g.GroupId}\": {{ \"name\": \"{g.Label}\" }},");
+        }
+        output.AppendLine("}");
+        output.AppendLine("```");
+        return output.ToString();
+    }
+
     [McpServerTool, Description("获取当前生效的智能路由配置（策略/重试/预算/退避），来自 appsettings.json 的 Routing 节点")]
     public string GetRoutingConfig() {
         var output = new StringBuilder();
@@ -135,6 +172,39 @@ foreach (var p in ranked) {
         output.AppendLine($"**失败切换退避**: {_routing.RetryBackoffMs}ms");
         output.AppendLine($"**热池阈值**: {_routing.HotPoolThreshold}（评分≥此值的可用提供商优先选用）");
         output.AppendLine($"**探索通道**: {(_routing.ExplorationEnabled ? "启用（热池空时降级探索补数据）" : "禁用")}");
+        return output.ToString();
+    }
+
+    // <summary>
+    /// 【功能说明】：列出所有模型分组及其包含的提供商，用于理解分组路由语义
+    /// 【服务对象】：OpenCode 客户端经 MCP 协议调用
+    /// 【调用方式】：list_model_groups MCP 工具
+    /// 【禁止重复】：项目内唯一分组列表实现
+    /// </summary>
+    [McpServerTool, Description("列出所有模型分组（高能力组/均衡组/图形处理组/推理组/代码组/文案组）及其包含的提供商和模型，用于理解分组路由语义")]
+    public async Task<string> ListModelGroups(CancellationToken cancellationToken = default) {
+        var catalog = await _proxy.GetProviderCatalogAsync(cancellationToken);
+        if (catalog.Length == 0) return "未配置任何提供商。";
+
+        // 收集所有分组名称并去重
+        var allGroups = catalog
+            .SelectMany(p => p.Groups ?? Array.Empty<string>())
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .OrderBy(g => g, StringComparer.Ordinal)
+            .ToArray();
+
+        var output = new StringBuilder();
+        output.AppendLine($"共 {allGroups.Length} 个分组，{catalog.Length} 个提供商:");
+        output.AppendLine();
+        foreach (var groupName in allGroups) {
+            var members = catalog.Where(p => p.Groups?.Any(g => g.Equals(groupName, StringComparison.OrdinalIgnoreCase)) == true).ToArray();
+            output.AppendLine($"### {groupName} ({members.Length} 个提供商)");
+            foreach (var p in members) {
+                var models = string.Join(", ", p.Models);
+                output.AppendLine($"  - {p.DisplayName} ({p.ProviderId}) [{(p.Available ? "可用" : "不可用")}，评分 {p.Score:0.#}]：{models}");
+            }
+            output.AppendLine();
+        }
         return output.ToString();
     }
 

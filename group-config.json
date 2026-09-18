@@ -1,0 +1,41 @@
+{
+  "modelAlias": "SuperModel",
+  "groups": [
+    {
+      "groupId": "高能力组",
+      "label": "高能力组",
+      "description": "汇聚全场评分最高的顶级模型，适合复杂推理、长文写作等硬任务",
+      "defaultModel": ""
+    },
+    {
+      "groupId": "均衡组",
+      "label": "均衡组",
+      "description": "评分优秀的优质模型，兼顾能力与稳定性，适合日常主力使用",
+      "defaultModel": ""
+    },
+    {
+      "groupId": "推理组",
+      "label": "推理组",
+      "description": "擅长逻辑推理与代码生成，适合编程、数学、逻辑类任务",
+      "defaultModel": ""
+    },
+    {
+      "groupId": "代码组",
+      "label": "代码组",
+      "description": "专注代码生成与调试，适合编程辅助、代码审查、重构等场景",
+      "defaultModel": ""
+    },
+    {
+      "groupId": "文案组",
+      "label": "文案组",
+      "description": "擅长自然语言创作，适合写作、翻译、摘要、文案生成等任务",
+      "defaultModel": ""
+    },
+    {
+      "groupId": "图形处理组",
+      "label": "图形处理组",
+      "description": "支持多模态视觉理解，适合图片分析、OCR、视觉问答等场景",
+      "defaultModel": ""
+    }
+  ]
+}

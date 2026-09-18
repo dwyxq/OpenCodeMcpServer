@@ -40,7 +40,9 @@ public record ChatProxyRequest(
     /// <summary>会话 ID（sticky 粘滞策略下将请求绑定到固定提供商）</summary>
     string? SessionId = null,
     /// <summary>必需能力标签（如 vision/function_calling），仅选择提供满足能力模型的提供商（空则不过滤）</summary>
-    string[]? Capabilities = null
+    string[]? Capabilities = null,
+    /// <summary>分组 ID（如"高能力组"/"推理组"/"代码组"，空则不过滤）</summary>
+    string? GroupId = null
 );
 
 /// <summary>
@@ -79,6 +81,7 @@ public record ProviderCatalogEntry(
     bool HasApiKey,
     bool Keyless,
     string[] Models,
+    string[]? Groups,
     bool Available,
     double Score,
     string? LastError

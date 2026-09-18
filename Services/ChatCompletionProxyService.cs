@@ -139,6 +139,7 @@ public class ChatCompletionProxyService : IChatCompletionProxyService {
                     HasApiKey: !p.Keyless && _health.ResolveApiKey(p) != null,
                     Keyless: p.Keyless,
                     Models: p.Models ?? Array.Empty<string>(),
+                    Groups: p.Groups ?? Array.Empty<string>(),
                     Available: h?.Available ?? false,
                     Score: h?.Score ?? 0,
                     LastError: h?.LastError);
@@ -158,11 +159,16 @@ public class ChatCompletionProxyService : IChatCompletionProxyService {
         var all = _healthImpl.GetConfiguredProviders()
             .GroupBy(p => p.ProviderId, StringComparer.OrdinalIgnoreCase)
             .Select(g => g.First())
-            .Where(p => p.Enabled && !_health.IsUnavailableForRouting(p.ProviderId))
+            .Where(p => p.Enabled && !_health.IsUnavailableForRouting(p.ProviderId)) //排除 健康评分低于阈值或限流中的提供商冷却期的模型
             .ToDictionary(p => p.ProviderId, StringComparer.OrdinalIgnoreCase);
 
+        // ProviderId 精确匹配（可选）
         if (!string.IsNullOrWhiteSpace(request.ProviderId)) {
             if (!all.TryGetValue(request.ProviderId, out var exact))
+                return new List<ProviderEndpointConfig>();
+            // 同时指定了 GroupId：验证该提供商属于此组
+            if (!string.IsNullOrWhiteSpace(request.GroupId)
+                && (exact.Groups == null || !exact.Groups.Any(g => g.Equals(request.GroupId, StringComparison.OrdinalIgnoreCase))))
                 return new List<ProviderEndpointConfig>();
             if (alias && ResolveAliasModel(exact) == null)
                 return new List<ProviderEndpointConfig>();
@@ -179,6 +185,14 @@ public class ChatCompletionProxyService : IChatCompletionProxyService {
                 && SupportsCapabilities(ep!, request.Model, request.Capabilities)))
             .Select(h => all[h.ProviderId])
             .ToList();
+
+        // 按分组过滤（可选）
+        if (!string.IsNullOrWhiteSpace(request.GroupId)) {
+            var groupId = request.GroupId!;
+            baseCandidates = baseCandidates
+                .Where(p => p.Groups?.Any(g => g.Equals(groupId, StringComparison.OrdinalIgnoreCase)) == true)
+                .ToList();
+        }
 
         switch (ResolveStrategy(request)) {
             case "sticky":      // 粘滞：会话已有绑定且绑定提供商仍可用则置顶；否则按健康排序并记录新绑定
@@ -362,7 +376,7 @@ public class ChatCompletionProxyService : IChatCompletionProxyService {
             if (_routing.TotalBudgetMs > 0 && totalStopwatch.ElapsedMilliseconds >= _routing.TotalBudgetMs) {
                 var budgetReason = $"总预算{_routing.TotalBudgetMs}ms已耗尽";
                 tried.Add((endpoint.ProviderId, budgetReason));
-                yield return SerializeSseError($"{lastError ?? "整次请求总预算已耗尽"}（已尝试: {string.Join(" -> ", FormatTried(tried))}）");
+                yield return SerializeSseError($"{lastError ?? "整次请求总预算已耗尽"}（已尝试: {string.Join($" {Environment.NewLine}-> ", FormatTried(tried))}）");
                 yield break;
             }
             if (attempts > 0 && _routing.RetryBackoffMs > 0)
@@ -421,7 +435,7 @@ public class ChatCompletionProxyService : IChatCompletionProxyService {
             }
             yield break;
         }
-        yield return SerializeSseError($"{lastError ?? "所有候选提供商均失败"}（已尝试: {string.Join(" -> ", FormatTried(tried))}）");
+        yield return SerializeSseError($"{lastError ?? "所有候选提供商均失败"}（已尝试: {string.Join($" {Environment.NewLine}-> ", FormatTried(tried))}）");
     }
 
     private static string SerializeSseError(string message) =>

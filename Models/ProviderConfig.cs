@@ -64,7 +64,10 @@ public record ProviderEndpointConfig(
     Dictionary<string, string[]>? Capabilities = null,
 
     /// <summary>别名路由（model=SuperModel/auto）时该提供商实际发送的模型；缺省回退 Models 列表首个</summary>
-    string? DefaultModel = null
+    string? DefaultModel = null,
+
+    /// <summary>模型分组标签（如"高能力组"/"推理组"/"代码组"，用于分组路由过滤）</summary>
+    string[]? Groups = null
 );
 
 /// <summary>

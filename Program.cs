@@ -140,6 +140,9 @@ builder.Services.AddHostedService<ModelCacheRefreshService>();
 // 注册 OpenAI 兼容 HTTP 网关后台服务（Kestrel，暴露固定模型别名 SuperModel 供 OpenCode 直接选用）
 builder.Services.AddHostedService<OpenCodeMcpServer.Services.HttpServer.OpenAiCompatibleHttpServer>();
 
+// 注册分组配置服务（单例）
+builder.Services.AddSingleton<IGroupConfigService, GroupConfigService>();
+
 // 注册 MCP 服务器
 builder.Services
     .AddMcpServer()

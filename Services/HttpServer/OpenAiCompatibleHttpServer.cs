@@ -19,6 +19,7 @@ using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 
 using OpenCodeMcpServer.Models;
+using OpenCodeMcpServer.Services;
 
 namespace OpenCodeMcpServer.Services.HttpServer;
 
@@ -34,17 +35,20 @@ public sealed class OpenAiCompatibleHttpServer : IHostedService {
     private readonly IOptions<McpServerConfig> _options;
     private readonly IChatCompletionProxyService _proxy;
     private readonly IProviderHealthService _health;
+    private readonly IGroupConfigService _groupConfig;
     private WebApplication? _app;
 
     public OpenAiCompatibleHttpServer(
         ILogger<OpenAiCompatibleHttpServer> logger,
         IOptions<McpServerConfig> options,
         IChatCompletionProxyService proxy,
-        IProviderHealthService health) {
+        IProviderHealthService health,
+        IGroupConfigService groupConfig) {
         _logger = logger;
         _options = options;
         _proxy = proxy;
         _health = health;
+        _groupConfig = groupConfig;
     }
 
     /// <inheritdoc/>
@@ -119,10 +123,14 @@ public sealed class OpenAiCompatibleHttpServer : IHostedService {
         var alias = _options.Value.Routing.ModelAlias;
         var listenUrl = cfg.Url.TrimEnd('/');
 
-        // GET /v1/models：列出固定别名；可选列出全部真实提供商模型
+        // GET /v1/models：列出分组别名（SuperModel-{GroupId}）+ 原始 SuperModel
         app.MapGet("/v1/models", async (HttpContext ctx) => {
             var list = new List<object>();
+            // 默认超级模型
             list.Add(ModelDto(alias, "OpenCodeMcpServer", "aggregate"));
+            // 各分组别名
+            foreach (var g in _groupConfig.Groups)
+                list.Add(ModelDto($"{alias}-{g.GroupId}", "OpenCodeMcpServer", g.Description ?? "group"));
             if (cfg.IncludeRealModels) {
                 foreach (var cat in await _proxy.GetProviderCatalogAsync(ctx.RequestAborted))
                     foreach (var m in cat.Models)
@@ -134,6 +142,8 @@ public sealed class OpenAiCompatibleHttpServer : IHostedService {
         // GET /models（兼容部分客户端省略 /v1 前缀）
         app.MapGet("/models", async (HttpContext ctx) => {
             var list = new List<object> { ModelDto(alias, "OpenCodeMcpServer", "aggregate") };
+            foreach (var g in _groupConfig.Groups)
+                list.Add(ModelDto($"{alias}-{g.GroupId}", "OpenCodeMcpServer", g.Description ?? "group"));
             return Results.Ok(new { @object = "list", data = list });
         });
 
@@ -147,10 +157,6 @@ public sealed class OpenAiCompatibleHttpServer : IHostedService {
             }
 
             var model = GetString(body, "model") ?? alias;
-            var messages = ReadMessages(body);
-            if (messages.Length == 0)
-                return Results.Json(new { error = new { message = "messages 不能为空", type = "invalid_request_error" } }, statusCode: StatusCodes.Status400BadRequest, options: JsonOpts);
-
             var temperature = GetDouble(body, "temperature");
             var maxTokens = GetInt(body, "max_tokens");
             var stream = GetBool(body, "stream") ?? false;
@@ -158,6 +164,19 @@ public sealed class OpenAiCompatibleHttpServer : IHostedService {
             var providerId = GetString(body, "provider_id");
             var strategy = GetString(body, "strategy");
             var capabilities = ReadCapabilities(body);
+            var groupId = GetString(body, "group_id");
+
+            // 分组别名解析：SuperModel-高能力组 → GroupId="高能力组"，model 回退为默认模型
+            if (_groupConfig.IsGroupAlias(model)) {
+                var gc = _groupConfig.ResolveAlias(model);
+                if (gc != null) {
+                    groupId = groupId ?? gc.GroupId;
+                    model = gc.DefaultModel ?? model;
+                }
+            }
+            var messages = ReadMessages(body);
+            if (messages.Length == 0)
+                return Results.Json(new { error = new { message = "messages 不能为空", type = "invalid_request_error" } }, statusCode: StatusCodes.Status400BadRequest, options: JsonOpts);
 
             var request = new ChatProxyRequest(
                 Model: model,
@@ -167,7 +186,8 @@ public sealed class OpenAiCompatibleHttpServer : IHostedService {
                 MaxTokens: maxTokens,
                 Strategy: strategy,
                 SessionId: sessionId,
-                Capabilities: capabilities);
+                Capabilities: capabilities,
+                GroupId: groupId);
 
             if (stream) {
                 // SSE 流式响应
@@ -191,7 +211,7 @@ public sealed class OpenAiCompatibleHttpServer : IHostedService {
                     ? "上游全部失败"
                     : result.Error;
                 if (result.TriedProviders.Length > 0)
-                    msg += $"（已尝试: {string.Join(" -> ", result.TriedProviders)}）";
+                    msg += $"（已尝试: {string.Join($" {Environment.NewLine}-> ", result.TriedProviders)}）";
                 return Results.Json(new {
                     error = new { message = msg, type = "upstream_error" }
                 },
