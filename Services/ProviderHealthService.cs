@@ -141,6 +141,7 @@ public class ProviderHealthService : IProviderHealthService {
         lock (state) {
             state.SuccessCount++;
             state.ConsecutiveFails = 0;
+            state.Reachable = true;
             state.LastLatencyMs = latencyMs;
             state.LastCheckedAt = DateTime.UtcNow;
             state.LastError = null;
@@ -155,6 +156,7 @@ public class ProviderHealthService : IProviderHealthService {
         lock (state) {
             state.FailCount++;
             state.ConsecutiveFails++;
+            state.Reachable = false;
             state.LastCheckedAt = DateTime.UtcNow;
             state.LastError = reason;
             if (state.ConsecutiveFails >= ConsecutiveFailThreshold) {

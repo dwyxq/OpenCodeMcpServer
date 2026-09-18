@@ -179,7 +179,10 @@ public class ChatCompletionProxyService : IChatCompletionProxyService {
         // 限流中的提供商（HTTP 429 避让期内）一律排除，健康但受限同样自动切换下一候选
         var ranked = _health.GetRankedProviders();
         var baseCandidates = (alias
-            ? ranked.Where(h => all.TryGetValue(h.ProviderId, out var ep) && ResolveAliasModel(ep!) != null)
+            ? ranked.Where(h => all.TryGetValue(h.ProviderId, out var ep) && ResolveAliasModel(ep!) != null
+                && (!string.IsNullOrWhiteSpace(request.GroupId)
+                    && ep!.Groups?.Any(g => g.Equals(request.GroupId!, StringComparison.OrdinalIgnoreCase)) == true
+                    || string.IsNullOrWhiteSpace(request.GroupId)))
             : ranked.Where(h => all.TryGetValue(h.ProviderId, out var ep)
                 && ServesModel(ep!, request.Model)
                 && SupportsCapabilities(ep!, request.Model, request.Capabilities)))

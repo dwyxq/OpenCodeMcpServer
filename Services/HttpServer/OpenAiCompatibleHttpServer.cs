@@ -166,12 +166,12 @@ public sealed class OpenAiCompatibleHttpServer : IHostedService {
             var capabilities = ReadCapabilities(body);
             var groupId = GetString(body, "group_id");
 
-            // 分组别名解析：SuperModel-高能力组 → GroupId="高能力组"，model 回退为默认模型
+            // 分组别名解析：SuperModel-高能力组 → GroupId="高能力组"，model 回退为默认模型或保持 SuperModel 别名
             if (_groupConfig.IsGroupAlias(model)) {
                 var gc = _groupConfig.ResolveAlias(model);
                 if (gc != null) {
                     groupId = groupId ?? gc.GroupId;
-                    model = gc.DefaultModel ?? model;
+                    model = string.IsNullOrWhiteSpace(gc.DefaultModel) ? alias : gc.DefaultModel;
                 }
             }
             var messages = ReadMessages(body);
