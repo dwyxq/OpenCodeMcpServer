@@ -165,6 +165,7 @@ public sealed class OpenAiCompatibleHttpServer : IHostedService {
             var strategy = GetString(body, "strategy");
             var capabilities = ReadCapabilities(body);
             var groupId = GetString(body, "group_id");
+            var aggMode = GetString(body, "mode");
 
             // 分组别名解析：SuperModel-高能力组 → GroupId="高能力组"，model 回退为默认模型或保持 SuperModel 别名
             if (_groupConfig.IsGroupAlias(model)) {
@@ -187,7 +188,8 @@ public sealed class OpenAiCompatibleHttpServer : IHostedService {
                 Strategy: strategy,
                 SessionId: sessionId,
                 Capabilities: capabilities,
-                GroupId: groupId);
+                GroupId: groupId,
+                Mode: aggMode);
 
             if (stream) {
                 // SSE 流式响应
