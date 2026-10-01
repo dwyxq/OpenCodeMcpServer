@@ -127,6 +127,8 @@ builder.Services.AddSingleton<IModelSourceProvider, OpenAiCompatibleCatalogProvi
 // 注册提供商健康与聊天代理服务（自动优化：评分选路 + 故障转移）
 builder.Services.AddSingleton<ProviderHealthService>();
 builder.Services.AddSingleton<IProviderHealthService>(sp => sp.GetRequiredService<ProviderHealthService>());
+builder.Services.AddSingleton<IVoteAggregateService, ParallelVoteService>();
+builder.Services.AddSingleton<IMoaAggregateService, MoaAggregateService>();
 builder.Services.AddSingleton<IChatCompletionProxyService, ChatCompletionProxyService>();
 
 // 注册服务

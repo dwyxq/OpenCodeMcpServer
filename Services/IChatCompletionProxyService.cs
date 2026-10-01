@@ -42,7 +42,10 @@ public record ChatProxyRequest(
     /// <summary>必需能力标签（如 vision/function_calling），仅选择提供满足能力模型的提供商（空则不过滤）</summary>
     string[]? Capabilities = null,
     /// <summary>分组 ID（如"高能力组"/"推理组"/"代码组"，空则不过滤）</summary>
-    string? GroupId = null
+    string? GroupId = null,
+
+    /// <summary>聚合模式：none=单路（默认）/ vote=共识投票并行 / moa=生成式裁判；覆盖 Routing.Aggregation.Mode</summary>
+    string? Mode = null
 );
 
 /// <summary>

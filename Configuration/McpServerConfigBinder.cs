@@ -47,7 +47,8 @@ public static class McpServerConfigBinder
             HotPoolThreshold: section["HotPoolThreshold"] == null ? def.HotPoolThreshold : int.Parse(section["HotPoolThreshold"]!),
             ExplorationEnabled: section["ExplorationEnabled"] == null ? def.ExplorationEnabled : bool.Parse(section["ExplorationEnabled"]!),
             RateLimitRetryAfterMs: section["RateLimitRetryAfterMs"] == null ? def.RateLimitRetryAfterMs : int.Parse(section["RateLimitRetryAfterMs"]!),
-            ModelAlias: string.IsNullOrWhiteSpace(section["ModelAlias"]) ? def.ModelAlias : section["ModelAlias"]!
+            ModelAlias: string.IsNullOrWhiteSpace(section["ModelAlias"]) ? def.ModelAlias : section["ModelAlias"]!,
+            Aggregation: BindAggregation(configuration)
         );
     }
 
@@ -60,7 +61,8 @@ public static class McpServerConfigBinder
         HotPoolThreshold: 80,
         ExplorationEnabled: true,
         RateLimitRetryAfterMs: 30000,
-        ModelAlias: "SuperModel"
+        ModelAlias: "SuperModel",
+        Aggregation: new AggregationConfig()
     );
 
     private static ProviderDiscoveryConfig BindProviderEndpoints(IConfiguration configuration)
@@ -165,4 +167,17 @@ public static class McpServerConfigBinder
     private static OpenRouterProviderConfig DefaultOpenRouterProviderConfig() => new();
     private static TogetherAiProviderConfig DefaultTogetherAiProviderConfig() => new();
     private static GroqProviderConfig DefaultGroqProviderConfig() => new();
+
+    private static AggregationConfig BindAggregation(IConfiguration configuration) {
+        var section = configuration.GetSection("Routing:Aggregation");
+        var def = new AggregationConfig();
+        return new AggregationConfig(
+            Mode: string.IsNullOrWhiteSpace(section["Mode"]) ? def.Mode : section["Mode"]!,
+            FanOut: section["FanOut"] == null ? def.FanOut : int.Parse(section["FanOut"]!),
+            JudgeModel: string.IsNullOrWhiteSpace(section["JudgeModel"]) ? def.JudgeModel : section["JudgeModel"]!,
+            JudgeProviderId: string.IsNullOrWhiteSpace(section["JudgeProviderId"]) ? def.JudgeProviderId : section["JudgeProviderId"]!,
+            ConsensusThreshold: section["ConsensusThreshold"] == null ? def.ConsensusThreshold : double.Parse(section["ConsensusThreshold"]!),
+            WeightBy: string.IsNullOrWhiteSpace(section["WeightBy"]) ? def.WeightBy : section["WeightBy"]!
+        );
+    }
 }

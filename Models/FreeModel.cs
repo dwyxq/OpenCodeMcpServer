@@ -188,7 +188,10 @@ public record RoutingConfig(
     /// <summary>提供商被限流（HTTP 429）后自动避让的退避毫秒（响应未带 Retry-After 时的默认值；带则用头值）</summary>
     int RateLimitRetryAfterMs = 30000,
     /// <summary>固定模型别名：chat_completion 的 model 填此值（或 auto）时，按健康评分自动选提供商并发送该提供商的默认模型（DefaultModel，缺省回退 Models 首个）</summary>
-    string ModelAlias = "SuperModel"
+    string ModelAlias = "SuperModel",
+
+    /// <summary>模型聚合配置（vote/moa/best_of_n 多路并行输出合并策略）</summary>
+    AggregationConfig Aggregation = null!
 );
 
 /// <summary>

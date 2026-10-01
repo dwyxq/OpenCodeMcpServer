@@ -24,6 +24,8 @@ public class ChatCompletionProxyService : IChatCompletionProxyService {
     private readonly IProviderHealthService _health;
     private readonly ProviderHealthService _healthImpl;
     private readonly RoutingConfig _routing;
+    private readonly IVoteAggregateService? _voteService;
+    private readonly IMoaAggregateService? _moaService;
     /// <summary>
     /// sticky 会话粘滞：sessionId → 绑定 ProviderId
     /// </summary>
@@ -37,12 +39,16 @@ public class ChatCompletionProxyService : IChatCompletionProxyService {
         ILogger<ChatCompletionProxyService> logger,
         IHttpClientFactory httpClientFactory,
         IProviderHealthService health,
-        IOptions<McpServerConfig> options) {
+        IOptions<McpServerConfig> options,
+        IVoteAggregateService? voteService = null,
+        IMoaAggregateService? moaService = null) {
         _logger = logger;
         _httpClientFactory = httpClientFactory;
         _health = health;
         _healthImpl = (ProviderHealthService)health;
-        _routing = options.Value.Routing ?? new RoutingConfig();
+        _routing = options.Value.Routing;
+        _voteService = voteService;
+        _moaService = moaService;
     }
 
     /// <inheritdoc/>
@@ -58,6 +64,34 @@ public class ChatCompletionProxyService : IChatCompletionProxyService {
             return Failure(request.Model, 0, Array.Empty<string>(),
                 alias ? $"别名 '{request.Model}' 无可用提供商（所有已启用提供商均无可用模型）"
                       : $"未找到提供模型 '{request.Model}' 的已配置提供商（可用 provider_models 工具查看目录）");
+
+        // 聚合模式：vote/moa/best_of_n → 并行多路；none/空 → 串行故障转移（原有逻辑）
+        var effectiveMode = string.IsNullOrWhiteSpace(request.Mode) ? _routing.Aggregation.Mode : request.Mode;
+        if (effectiveMode == "vote" && candidates.Count >= 2 && _voteService != null) {
+            return await _voteService.AggregateAsync(request, candidates, cancellationToken);
+        }
+        if (effectiveMode == "moa" && candidates.Count >= 2 && _moaService != null) {
+            return await _moaService.AggregateAsync(request, candidates, cancellationToken);
+        }
+        if (effectiveMode == "best_of_n" && candidates.Count >= 2) {
+            // best_of_n：并行 N 路，取健康评分最高者的响应
+            var ranked = _health.GetRankedProviders();
+            var scoreMap = ranked.ToDictionary(h => h.ProviderId, h => h.Score, StringComparer.OrdinalIgnoreCase);
+            var sorted = candidates.OrderByDescending(c => scoreMap.GetValueOrDefault(c.ProviderId, 0)).ToList();
+            var ep = sorted[0];
+            var actualModel = alias ? ResolveAliasModel(ep)! : StripProviderPrefix(request.Model, ep);
+            var sw = System.Diagnostics.Stopwatch.StartNew();
+            try {
+                var json = await SendOnceAsync(ep, request, actualModel, cancellationToken);
+                sw.Stop();
+                _health.ReportSuccess(ep.ProviderId, sw.ElapsedMilliseconds);
+                return new ChatProxyResult(true, ep.ProviderId, actualModel, json, sw.ElapsedMilliseconds, 1, [], null);
+            } catch (Exception ex) {
+                sw.Stop();
+                _ = Task.Run(() => _health.ReportFailure(ep.ProviderId, ex.Message));
+                return new ChatProxyResult(false, ep.ProviderId, actualModel, null, sw.ElapsedMilliseconds, 1, [ep.ProviderId], ex.Message);
+            }
+        }
 
         var tried = new List<(string ProviderId, string Reason)>();
         var attempts = 0;
