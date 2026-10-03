@@ -188,6 +188,23 @@ public class MoaAggregateService(
 
     private async Task<ChatProxyResult> CallWithFallbackAsync(ChatProxyRequest request, CancellationToken cancellationToken)
     {
+        // 解析 provider/model 格式 → 精确匹配提供商
+        var slashIdx = request.Model.IndexOf('/');
+        string? parsedProviderId = null;
+        string parsedModel = request.Model;
+        if (slashIdx > 0 && !string.IsNullOrWhiteSpace(request.ProviderId))
+        {
+            parsedProviderId = request.ProviderId;
+            parsedModel = request.Model;
+        }
+        else if (slashIdx > 0)
+        {
+            parsedProviderId = request.Model[..slashIdx];
+            parsedModel = request.Model[(slashIdx + 1)..];
+        }
+        if (!string.IsNullOrWhiteSpace(request.ProviderId))
+            parsedProviderId = request.ProviderId;
+
         var alias = request.Model == "SuperModel" || request.Model == "auto";
         var all = healthImpl.GetConfiguredProviders()
             .GroupBy(p => p.ProviderId, StringComparer.OrdinalIgnoreCase)
@@ -195,11 +212,12 @@ public class MoaAggregateService(
             .Where(p => p.Enabled && !healthImpl.IsUnavailableForRouting(p.ProviderId))
             .ToDictionary(p => p.ProviderId, StringComparer.OrdinalIgnoreCase);
 
-        if (!string.IsNullOrWhiteSpace(request.ProviderId))
+        // provider/model 格式：精确匹配
+        if (!string.IsNullOrWhiteSpace(parsedProviderId))
         {
-            if (!all.TryGetValue(request.ProviderId, out var ep))
-                return new ChatProxyResult(false, null, request.Model, null, 0, 1, [], $"未找到提供商 {request.ProviderId}");
-            return await SendSingleAsync(ep, request, alias ? (ep.DefaultModel ?? ep.Models!.FirstOrDefault()!) : StripPrefix(request.Model, ep), cancellationToken);
+            if (!all.TryGetValue(parsedProviderId, out var ep))
+                return new ChatProxyResult(false, null, parsedModel, null, 0, 1, [], $"未找到提供商 {parsedProviderId}");
+            return await SendSingleAsync(ep, request, parsedModel, cancellationToken);
         }
 
         var ranked = healthImpl.GetRankedProviders();

@@ -74,23 +74,32 @@ public class ChatCompletionProxyService : IChatCompletionProxyService {
             return await _moaService.AggregateAsync(request, candidates, cancellationToken);
         }
         if (effectiveMode == "best_of_n" && candidates.Count >= 2) {
-            // best_of_n：并行 N 路，取健康评分最高者的响应
+            // best_of_n：按健康评分排序后依次尝试，返回首个成功的最高分候选
             var ranked = _health.GetRankedProviders();
             var scoreMap = ranked.ToDictionary(h => h.ProviderId, h => h.Score, StringComparer.OrdinalIgnoreCase);
             var sorted = candidates.OrderByDescending(c => scoreMap.GetValueOrDefault(c.ProviderId, 0)).ToList();
-            var ep = sorted[0];
-            var actualModel = alias ? ResolveAliasModel(ep)! : StripProviderPrefix(request.Model, ep);
-            var sw = System.Diagnostics.Stopwatch.StartNew();
-            try {
-                var json = await SendOnceAsync(ep, request, actualModel, cancellationToken);
-                sw.Stop();
-                _health.ReportSuccess(ep.ProviderId, sw.ElapsedMilliseconds);
-                return new ChatProxyResult(true, ep.ProviderId, actualModel, json, sw.ElapsedMilliseconds, 1, [], null);
-            } catch (Exception ex) {
-                sw.Stop();
-                _ = Task.Run(() => _health.ReportFailure(ep.ProviderId, ex.Message));
-                return new ChatProxyResult(false, ep.ProviderId, actualModel, null, sw.ElapsedMilliseconds, 1, [ep.ProviderId], ex.Message);
+            var triedBoN = new List<(string ProviderId, string Reason)>();
+            var attemptsBoN = 0;
+            string? lastErrorBoN = null;
+            foreach (var ep in sorted) {
+                attemptsBoN++;
+                var actualModel = alias ? ResolveAliasModel(ep)! : StripProviderPrefix(request.Model, ep);
+                var sw = System.Diagnostics.Stopwatch.StartNew();
+                try {
+                    var json = await SendOnceAsync(ep, request, actualModel, cancellationToken);
+                    sw.Stop();
+                    _health.ReportSuccess(ep.ProviderId, sw.ElapsedMilliseconds);
+                    _logger.LogInformation("best_of_n ok: provider={Provider} score={Score} attempts={Attempts}", ep.ProviderId, scoreMap.GetValueOrDefault(ep.ProviderId, 0), attemptsBoN);
+                    return new ChatProxyResult(true, ep.ProviderId, actualModel, json, sw.ElapsedMilliseconds, attemptsBoN, FormatTried(triedBoN), null);
+                } catch (Exception ex) {
+                    sw.Stop();
+                    var reason = ex.Message.Length > 40 ? ex.Message[..40] + "..." : ex.Message;
+                    triedBoN.Add((ep.ProviderId, reason));
+                    lastErrorBoN = $"{ep.ProviderId}: {reason}";
+                    _ = Task.Run(() => _health.ReportFailure(ep.ProviderId, ex.Message));
+                }
             }
+            return Failure(request.Model, attemptsBoN, FormatTried(triedBoN), lastErrorBoN ?? "所有候选均失败");
         }
 
         var tried = new List<(string ProviderId, string Reason)>();
